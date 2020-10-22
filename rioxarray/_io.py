@@ -9,6 +9,7 @@ Source file: https://github.com/pydata/xarray/blob/1d7bcbdc75b6d556c04e2c7d7a042
 import os
 import re
 import warnings
+from collections import OrderedDict
 from distutils.version import LooseVersion
 
 import numpy as np
@@ -39,24 +40,24 @@ class RasterioArrayWrapper(BackendArray):
         manager,
         lock,
         name,
+        dim_sizes,
         vrt_params=None,
         masked=False,
         mask_and_scale=False,
         unsigned=False,
     ):
-        from rasterio.vrt import WarpedVRT
-
         self.manager = manager
         self.lock = lock
         self.masked = masked or mask_and_scale
         self.mask_and_scale = mask_and_scale
+        self.dim_sizes = dim_sizes
 
         # cannot save riods as an attribute: this would break pickleability
         riods = manager.acquire()
         if vrt_params is not None:
             riods = WarpedVRT(riods, **vrt_params)
         self.vrt_params = vrt_params
-        self._shape = (riods.count, riods.height, riods.width)
+        self._shape = tuple(dim_sizes.values())
 
         self._dtype = None
         dtypes = riods.dtypes
@@ -144,8 +145,6 @@ class RasterioArrayWrapper(BackendArray):
         return band_key, tuple(window), tuple(squeeze_axis), tuple(np_inds)
 
     def _getitem(self, key):
-        from rasterio.vrt import WarpedVRT
-
         band_key, window, squeeze_axis, np_inds = self._get_indexer(key)
 
         if not band_key or any(start == stop for (start, stop) in window):
@@ -167,6 +166,8 @@ class RasterioArrayWrapper(BackendArray):
                             out[band_iii] * riods.scales[band_iii]
                             + riods.offsets[band_iii]
                         )
+                if out.shape != self.shape:
+                    out = out.reshape(self.shape)
 
         if squeeze_axis:
             out = np.squeeze(out, axis=squeeze_axis)
@@ -278,6 +279,17 @@ def _load_netcdf_attrs(tags, data_array):
             data_array.coords[variable_name].attrs.update({attr_name: value})
 
 
+def _load_netcdf_dims(tags):
+    """
+    Dimension information:
+        - NETCDF_DIM_EXTRA: '{time}' (comma separated list of dim names)
+    """
+    dim_names = tags.get("NETCDF_DIM_EXTRA")
+    if not dim_names:
+        return ()
+    return dim_names.strip("{}").split(",")
+
+
 def _load_netcdf_1d_coords(tags):
     """
     Dimension information:
@@ -285,10 +297,9 @@ def _load_netcdf_1d_coords(tags):
         - NETCDF_DIM_time_DEF: '{2,6}' (dim size, dim dtype)
         - NETCDF_DIM_time_VALUES: '{0,872712.659688}' (comma separated list of data)
     """
-    dim_names = tags.get("NETCDF_DIM_EXTRA")
+    dim_names = _load_netcdf_dims(tags)
     if not dim_names:
         return {}
-    dim_names = dim_names.strip("{}").split(",")
     coords = {}
     for dim_name in dim_names:
         dim_def = tags.get(f"NETCDF_DIM_{dim_name}_DEF")
@@ -705,14 +716,20 @@ def open_rasterio(
     attrs = _get_rasterio_attrs(riods=riods)
     coords = _load_netcdf_1d_coords(riods.tags())
     _parse_driver_tags(riods=riods, attrs=attrs, coords=coords)
-    for coord in coords:
-        if f"NETCDF_DIM_{coord}" in attrs:
-            coord_name = coord
-            attrs.pop(f"NETCDF_DIM_{coord}")
-            break
+    if coords:
+        extra_dims = _load_netcdf_dims(riods.tags())
+        dim_sizes = OrderedDict((dim, 0) for dim in (*extra_dims, "y", "x"))
+        dim_sizes.update({"x": riods.width, "y": riods.height})
+        for dim in extra_dims:
+            dim_sizes[dim] = len(coords[dim])
+        for coord in coords:
+            if f"NETCDF_DIM_{coord}" in attrs:
+                attrs.pop(f"NETCDF_DIM_{coord}")
     else:
-        coord_name = "band"
-        coords[coord_name] = np.asarray(riods.indexes)
+        dim_sizes = OrderedDict(
+            (("band", riods.count), ("y", riods.height), ("x", riods.width))
+        )
+        coords["band"] = np.asarray(riods.indexes)
 
     # Get geospatial coordinates
     transform = _rio_transform(riods)
@@ -745,6 +762,7 @@ def open_rasterio(
             masked=masked,
             mask_and_scale=mask_and_scale,
             unsigned=unsigned,
+            dim_sizes=dim_sizes,
         )
     )
 
@@ -754,7 +772,7 @@ def open_rasterio(
         data = indexing.MemoryCachedArray(data)
 
     result = DataArray(
-        data=data, dims=(coord_name, "y", "x"), coords=coords, attrs=attrs, name=da_name
+        data=data, dims=tuple(dim_sizes), coords=coords, attrs=attrs, name=da_name
     )
     result.encoding = encoding
 
