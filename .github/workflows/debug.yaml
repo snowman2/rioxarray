@@ -20,5 +20,5 @@ jobs:
       - name: Print
         shell: bash
         run: |
-          echo {{ github.event_name }}
-          echo {{ github.ref }}
+          echo ${{ github.event_name }}
+          echo ${{ github.ref }}
