@@ -9,7 +9,9 @@ datacube is licensed under the Apache License, Version 2.0:
 - https://github.com/opendatacube/datacube-core/blob/1d345f08a10a13c316f81100936b0ad8b1a374eb/LICENSE  # noqa: E501
 
 """
+
 import copy
+import importlib.metadata
 import os
 from collections.abc import Hashable, Iterable, Mapping
 from pathlib import Path
@@ -21,6 +23,7 @@ import rasterio.mask
 import rasterio.warp
 import xarray
 from affine import Affine
+from packaging import version
 from rasterio.dtypes import dtype_rev
 from rasterio.enums import Resampling
 from rasterio.features import geometry_mask
@@ -42,6 +45,10 @@ from rioxarray.rioxarray import (
     _make_coords,
     _order_bounds,
 )
+
+_RASTERIO_GTE_1_4 = version.parse(
+    importlib.metadata.version("rasterio")
+) >= version.parse("1.4a1")
 
 # DTYPE TO NODATA MAP
 # Based on: https://github.com/OSGeo/gdal/blob/
@@ -436,11 +443,29 @@ class RasterArray(XRasterBase):
         if gcps:
             kwargs.setdefault("gcps", gcps)
 
-        gcps_or_rpcs = "gcps" in kwargs or "rpcs" in kwargs
-        src_affine = None if gcps_or_rpcs else self.transform(recalc=True)
+        geolocation_kwargs = {}
+        if _RASTERIO_GTE_1_4 and "xc" in self._obj.coords and "yc" in self._obj.coords:
+            geolocation_kwargs.update(
+                src_geoloc_array=(
+                    self._obj.coords["xc"].values,
+                    self._obj.coords["yc"].values,
+                ),
+                georeferencing_convention="PIXEL_CENTER",
+            )
+
+        use_affine = (
+            "gcps" not in kwargs and "rpcs" not in kwargs and not geolocation_kwargs
+        )
+        src_affine = None if not use_affine else self.transform(recalc=True)
         if transform is None:
             dst_affine, dst_width, dst_height = _make_dst_affine(
-                self._obj, self.crs, dst_crs, resolution, shape, **kwargs
+                self._obj,
+                self.crs,
+                dst_crs,
+                resolution,
+                shape,
+                **geolocation_kwargs,
+                **kwargs,
             )
         else:
             dst_affine = transform
@@ -452,7 +477,6 @@ class RasterArray(XRasterBase):
         dst_data = self._create_dst_data(dst_height, dst_width)
 
         dst_nodata = self._get_dst_nodata(nodata)
-
         rasterio.warp.reproject(
             source=self._obj.values,
             destination=dst_data,
@@ -463,6 +487,7 @@ class RasterArray(XRasterBase):
             dst_crs=dst_crs,
             dst_nodata=dst_nodata,
             resampling=resampling,
+            **geolocation_kwargs,
             **kwargs,
         )
         # add necessary attributes
@@ -484,7 +509,7 @@ class RasterArray(XRasterBase):
                 dst_affine=dst_affine,
                 dst_width=dst_width,
                 dst_height=dst_height,
-                force_generate=gcps_or_rpcs,
+                force_generate=not use_affine,
             ),
             dims=tuple(dst_dims),
             attrs=new_attrs,
