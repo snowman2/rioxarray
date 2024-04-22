@@ -31,6 +31,7 @@ from rioxarray._io import FILL_VALUE_NAMES, UNWANTED_RIO_ATTRS
 from rioxarray.crs import crs_from_user_input
 from rioxarray.exceptions import (
     MissingCRS,
+    MissingSpatialCoordinateError,
     NoDataInBounds,
     OneDimensionalRaster,
     RioXarrayError,
@@ -95,6 +96,10 @@ def _add_attrs_proj(
         new_data_array.rio._x_dim = src_data_array.rio.x_dim
     if new_data_array.rio._y_dim is None:
         new_data_array.rio._y_dim = src_data_array.rio.y_dim
+    if new_data_array.rio._x_coord is None:
+        new_data_array.rio._x_coord = src_data_array.rio.x_coord
+    if new_data_array.rio._y_coord is None:
+        new_data_array.rio._y_coord = src_data_array.rio.y_coord
 
     # make sure attributes preserved
     new_attrs = _generate_attrs(src_data_array, None)
@@ -215,8 +220,9 @@ def _clip_xarray(
     if drop:
         cropped_ds.rio.set_spatial_dims(
             x_dim=xds.rio.x_dim, y_dim=xds.rio.y_dim, inplace=True
-        )
-        cropped_ds = cropped_ds.rio.isel_window(
+        ).rio.set_spatial_coords(
+            x_coord=xds.rio.x_coord, y_coord=xds.rio.y_coord, inplace=True
+        ).rio.isel_window(
             rasterio.windows.get_data_window(
                 numpy.ma.masked_array(clip_mask_arr, ~clip_mask_arr)
             )
@@ -559,22 +565,29 @@ class RasterArray(XRasterBase):
         # hack to resolve: https://github.com/corteva/rioxarray/issues/298
         # may be resolved in the future by flexible indexes:
         # https://github.com/pydata/xarray/pull/4489#issuecomment-831809607
-        x_attrs = reprojected_data_array[reprojected_data_array.rio.x_dim].attrs.copy()
-        y_attrs = reprojected_data_array[reprojected_data_array.rio.y_dim].attrs.copy()
-        # ensure coords the same
-        reprojected_data_array = reprojected_data_array.assign_coords(
-            {
-                reprojected_data_array.rio.x_dim: copy.copy(
-                    match_data_array[match_data_array.rio.x_dim].values
-                ),
-                reprojected_data_array.rio.y_dim: copy.copy(
-                    match_data_array[match_data_array.rio.y_dim].values
-                ),
-            }
-        )
-        # ensure attributes copied
-        reprojected_data_array[reprojected_data_array.rio.x_dim].attrs = x_attrs
-        reprojected_data_array[reprojected_data_array.rio.y_dim].attrs = y_attrs
+        try:
+            x_attrs = reprojected_data_array[
+                reprojected_data_array.rio.x_coord
+            ].attrs.copy()
+            y_attrs = reprojected_data_array[
+                reprojected_data_array.rio.y_coord
+            ].attrs.copy()
+            # ensure coords the same
+            reprojected_data_array = reprojected_data_array.assign_coords(
+                {
+                    reprojected_data_array.rio.x_coord: copy.copy(
+                        match_data_array[match_data_array.rio.x_coord].values
+                    ),
+                    reprojected_data_array.rio.y_coord: copy.copy(
+                        match_data_array[match_data_array.rio.y_coord].values
+                    ),
+                }
+            )
+            # ensure attributes copied
+            reprojected_data_array[reprojected_data_array.rio.x_coord].attrs = x_attrs
+            reprojected_data_array[reprojected_data_array.rio.y_coord].attrs = y_attrs
+        except MissingSpatialCoordinateError:
+            pass
         return reprojected_data_array
 
     def pad_xy(
@@ -616,8 +629,8 @@ class RasterArray(XRasterBase):
         resolution_x, resolution_y = self.resolution()
         y_before = y_after = 0
         x_before = x_after = 0
-        y_coord: Union[xarray.DataArray, numpy.ndarray] = self._obj[self.y_dim]
-        x_coord: Union[xarray.DataArray, numpy.ndarray] = self._obj[self.x_dim]
+        y_coord: Union[xarray.DataArray, numpy.ndarray] = self._obj[self.y_coord]
+        x_coord: Union[xarray.DataArray, numpy.ndarray] = self._obj[self.x_coord]
 
         if top - resolution_y < maxy:
             new_y_coord: numpy.ndarray = numpy.arange(bottom, maxy, -resolution_y)[::-1]
@@ -644,15 +657,19 @@ class RasterArray(XRasterBase):
         if constant_values is None:
             constant_values = numpy.nan if self.nodata is None else self.nodata
 
-        superset = self._obj.pad(
-            pad_width={
-                self.x_dim: (x_before, x_after),
-                self.y_dim: (y_before, y_after),
-            },
-            constant_values=constant_values,  # type: ignore
-        ).rio.set_spatial_dims(x_dim=self.x_dim, y_dim=self.y_dim, inplace=True)
-        superset[self.x_dim] = x_coord
-        superset[self.y_dim] = y_coord
+        superset = (
+            self._obj.pad(
+                pad_width={
+                    self.x_coord: (x_before, x_after),
+                    self.y_coord: (y_before, y_after),
+                },
+                constant_values=constant_values,  # type: ignore
+            )
+            .rio.set_spatial_dims(x_dim=self.x_dim, y_dim=self.y_dim, inplace=True)
+            .rio.set_spatial_coords(x_coord=x_coord, y_coord=y_coord, inplace=True)
+        )
+        superset[self.x_coord] = x_coord
+        superset[self.y_coord] = y_coord
         superset.rio.write_transform(inplace=True)
         return superset
 
@@ -916,10 +933,7 @@ class RasterArray(XRasterBase):
                 invert=invert,
             )
 
-        if (
-            cropped_ds.coords[self.x_dim].size < 1
-            or cropped_ds.coords[self.y_dim].size < 1
-        ):
+        if cropped_ds.sizes[self.x_dim] < 1 or cropped_ds.sizes[self.y_dim] < 1:
             raise NoDataInBounds(
                 f"No data found in bounds.{_get_data_var_message(self._obj)}"
             )
@@ -969,9 +983,17 @@ class RasterArray(XRasterBase):
         if not data_bool.any():
             return src_data
 
-        x_coords, y_coords = numpy.meshgrid(
-            self._obj.coords[self.x_dim].values, self._obj.coords[self.y_dim].values
-        )
+        if (
+            self._obj.coords[self.x_coord].ndim == 1
+            and self._obj.coords[self.y_coord].ndim == 1
+        ):
+            x_coords, y_coords = numpy.meshgrid(
+                self._obj.coords[self.x_coord].values,
+                self._obj.coords[self.y_coord].values,
+            )
+        else:
+            x_coords = self._obj.coords[self.x_coord].values
+            y_coords = self._obj.coords[self.y_coord].values
 
         return griddata(
             points=(x_coords.flatten()[data_bool], y_coords.flatten()[data_bool]),

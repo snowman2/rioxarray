@@ -23,9 +23,9 @@ from rioxarray._options import EXPORT_GRID_MAPPING, get_option
 from rioxarray.crs import crs_from_user_input
 from rioxarray.exceptions import (
     DimensionError,
-    DimensionMissingCoordinateError,
     InvalidDimensionOrder,
     MissingCRS,
+    MissingSpatialCoordinateError,
     MissingSpatialDimensionError,
     NoDataInBounds,
     OneDimensionalRaster,
@@ -137,13 +137,13 @@ def _get_nonspatial_coords(
     src_data_array: Union[xarray.DataArray, xarray.Dataset]
 ) -> dict[Hashable, Union[xarray.Variable, xarray.IndexVariable]]:
     coords: dict[Hashable, Union[xarray.Variable, xarray.IndexVariable]] = {}
-    for coord in set(src_data_array.coords) - {
-        src_data_array.rio.x_dim,
-        src_data_array.rio.y_dim,
-        DEFAULT_GRID_MAP,
-        "xc",
-        "yc",
-    }:
+    existing_coords = set(DEFAULT_GRID_MAP)
+    try:
+        existing_coords.add(src_data_array.rio.x_coord)
+        existing_coords.add(src_data_array.rio.y_coord)
+    except MissingSpatialCoordinateError:
+        pass
+    for coord in set(src_data_array.coords) - existing_coords:
         if src_data_array[coord].ndim == 1:
             coords[coord] = xarray.IndexVariable(
                 src_data_array[coord].dims,
@@ -168,14 +168,13 @@ def _make_coords(
 ) -> dict[Hashable, Any]:
     """Generate the coordinates of the new projected `xarray.DataArray`"""
     coords = _get_nonspatial_coords(src_data_array)
-    if (
-        force_generate
-        or (
-            src_data_array.rio.x_dim in src_data_array.coords
-            and src_data_array.rio.y_dim in src_data_array.coords
-        )
-        or ("xc" in src_data_array.coords and "yc" in src_data_array.coords)
-    ):
+    try:
+        src_data_array.rio.x_coord
+        src_data_array.rio.y_coord
+        coords_exist = True
+    except MissingSpatialCoordinateError:
+        coords_exist = False
+    if force_generate or coords_exist:
         new_coords = _generate_spatial_coords(dst_affine, dst_width, dst_height)
         new_coords.update(coords)
         return new_coords
@@ -207,6 +206,24 @@ def _get_spatial_dims(
             )
             return obj.rio.x_dim, obj.rio.y_dim
         except MissingSpatialDimensionError:
+            raise err from None
+
+
+def _get_spatial_coords(
+    obj: Union[xarray.Dataset, xarray.DataArray], var: Union[Any, Hashable]
+) -> tuple[str, str]:
+    """
+    Retrieve the spatial dimensions of the dataset
+    """
+    try:
+        return obj[var].rio.x_coord, obj[var].rio.x_coord
+    except MissingSpatialCoordinateError as err:
+        try:
+            obj[var].rio.set_spatial_coords(
+                x_coord=obj.rio.x_coord, y_coord=obj.rio.x_coord, inplace=True
+            )
+            return obj.rio.x_coord, obj.rio.x_coord
+        except MissingSpatialCoordinateError:
             raise err from None
 
 
@@ -259,30 +276,60 @@ class XRasterBase:
 
         self._x_dim: Optional[Hashable] = None
         self._y_dim: Optional[Hashable] = None
-        # Determine the spatial dimensions of the `xarray.DataArray`
-        if "x" in self._obj.dims and "y" in self._obj.dims:
-            self._x_dim = "x"
-            self._y_dim = "y"
-        elif "longitude" in self._obj.dims and "latitude" in self._obj.dims:
-            self._x_dim = "longitude"
-            self._y_dim = "latitude"
+        self._x_coord: Optional[Hashable] = None
+        self._y_coord: Optional[Hashable] = None
+        # determine the spatial coordinates
+        if "x" in self._obj.coords and "y" in self._obj.coords:
+            self._x_coord = "x"
+            self._y_coord = "y"
+        elif "longitude" in self._obj.coords and "latitude" in self._obj.coords:
+            self._x_coord = "longitude"
+            self._y_coord = "latitude"
         else:
             # look for coordinates with CF attributes
+            one_dimensional_coordinates = []
+            two_dimensional_coordinates = []
             for coord in self._obj.coords:
-                # make sure to only look in 1D coordinates
-                # that has the same dimension name as the coordinate
-                if self._obj.coords[coord].dims != (coord,):
-                    continue
+                if self._obj.coords[coord].ndim == 1:
+                    one_dimensional_coordinates.append(coord)
+                elif self._obj.coords[coord].ndim == 2:
+                    two_dimensional_coordinates.append(coord)
+
+            # prefer one_dimensional_coordinates
+            for coord in one_dimensional_coordinates + two_dimensional_coordinates:
+                if self._x_coord is not None and self._y_coord is not None:
+                    break
                 if (self._obj.coords[coord].attrs.get("axis", "").upper() == "X") or (
                     self._obj.coords[coord].attrs.get("standard_name", "").lower()
                     in ("longitude", "projection_x_coordinate")
                 ):
-                    self._x_dim = coord
-                elif (self._obj.coords[coord].attrs.get("axis", "").upper() == "Y") or (
+                    self._x_coord = coord
+
+                if (self._obj.coords[coord].attrs.get("axis", "").upper() == "Y") or (
                     self._obj.coords[coord].attrs.get("standard_name", "").lower()
                     in ("latitude", "projection_y_coordinate")
                 ):
-                    self._y_dim = coord
+                    self._y_coord = coord
+
+        # determine the spatial dimensions
+        if self._x_coord is not None:
+            if self._x_coord in self._obj.sizes:
+                self._x_dim = self._x_coord
+            elif self._obj.coords[self._x_coord].ndim == 1:
+                self._x_dim = self._obj[self._x_coord].dims[0]
+        if self._y_coord is not None:
+            if self._y_coord in self._obj.sizes:
+                self._y_dim = self._y_coord
+            elif self._obj[self._y_coord].ndim == 1:
+                self._y_dim = self._obj[self._y_coord].dims[0]
+
+        if self._x_dim is None or self._y_dim is None:
+            if "x" in self._obj.sizes and "y" in self._obj.sizes:
+                self._x_dim = "x"
+                self._y_dim = "y"
+            elif "longitude" in self._obj.sizes and "latitude" in self._obj.sizes:
+                self._x_dim = "longitude"
+                self._y_dim = "latitude"
 
         # properties
         self._count: Optional[int] = None
@@ -344,6 +391,8 @@ class XRasterBase:
         # preserve attribute information
         obj_copy.rio._x_dim = self._x_dim
         obj_copy.rio._y_dim = self._y_dim
+        obj_copy.rio._x_coord = self._x_coord
+        obj_copy.rio._y_coord = self._y_coord
         obj_copy.rio._width = self._width
         obj_copy.rio._height = self._height
         obj_copy.rio._crs = self._crs
@@ -425,6 +474,10 @@ class XRasterBase:
                     x_dim, y_dim = _get_spatial_dims(data_obj, var)
                 except MissingSpatialDimensionError:
                     continue
+                try:
+                    x_coord, y_coord = _get_spatial_coords(data_obj, var)
+                except MissingSpatialCoordinateError:
+                    continue
                 # remove grid_mapping from attributes if it exists
                 # and update the grid_mapping in encoding
                 new_attrs = dict(data_obj[var].attrs)
@@ -433,6 +486,8 @@ class XRasterBase:
                     {"grid_mapping": grid_mapping_name}, inplace=True
                 ).rio.update_attrs(new_attrs, inplace=True).rio.set_spatial_dims(
                     x_dim=x_dim, y_dim=y_dim, inplace=True
+                ).rio.set_spatial_coords(
+                    x_coord=x_coord, y_coord=y_coord, inplace=True
                 )
         # remove grid_mapping from attributes if it exists
         # and update the grid_mapping in encoding
@@ -661,7 +716,7 @@ class XRasterBase:
         try:
             src_left, _, _, src_top = self._unordered_bounds(recalc=recalc)
             src_resolution_x, src_resolution_y = self.resolution(recalc=recalc)
-        except (DimensionMissingCoordinateError, DimensionError):
+        except (MissingSpatialCoordinateError, DimensionError):
             return Affine.identity() if transform is None else transform
         return Affine.translation(src_left, src_top) * Affine.scale(
             src_resolution_x, src_resolution_y
@@ -689,9 +744,9 @@ class XRasterBase:
         # add metadata to x,y coordinates
         is_projected = data_obj.rio.crs and data_obj.rio.crs.is_projected
         is_geographic = data_obj.rio.crs and data_obj.rio.crs.is_geographic
-        x_coord_attrs = dict(data_obj.coords[self.x_dim].attrs)
+        x_coord_attrs = dict(data_obj.coords[self.x_coord].attrs)
         x_coord_attrs["axis"] = "X"
-        y_coord_attrs = dict(data_obj.coords[self.y_dim].attrs)
+        y_coord_attrs = dict(data_obj.coords[self.y_coord].attrs)
         y_coord_attrs["axis"] = "Y"
         if is_projected:
             units = None
@@ -720,8 +775,8 @@ class XRasterBase:
             y_coord_attrs["long_name"] = "latitude"
             y_coord_attrs["standard_name"] = "latitude"
             y_coord_attrs["units"] = "degrees_north"
-        data_obj.coords[self.y_dim].attrs = y_coord_attrs
-        data_obj.coords[self.x_dim].attrs = x_coord_attrs
+        data_obj.coords[self.y_coord].attrs = y_coord_attrs
+        data_obj.coords[self.x_coord].attrs = x_coord_attrs
         return data_obj
 
     def set_attrs(
@@ -830,6 +885,44 @@ class XRasterBase:
         data_encoding.update(**new_encoding)
         return self.set_encoding(data_encoding, inplace=inplace)
 
+    def set_spatial_coords(
+        self, x_coord: str, y_coord: str, inplace: bool = True
+    ) -> Union[xarray.Dataset, xarray.DataArray]:
+        """
+        This sets the spatial coordinates of the dataset.
+
+        Parameters
+        ----------
+        x_coord: str
+            The name of the x coordinate.
+        y_coord: str
+            The name of the y coordinate.
+        inplace: bool, optional
+            If True, it will modify the dataframe in place.
+            Otherwise it will return a modified copy.
+
+        Returns
+        -------
+        :obj:`xarray.Dataset` | :obj:`xarray.DataArray`:
+            Dataset with spatial coordinates set.
+        """
+
+        data_obj = self._get_obj(inplace=inplace)
+        if x_coord in data_obj.coords:
+            data_obj.rio._x_coord = x_coord
+        else:
+            raise MissingSpatialCoordinateError(
+                f"x coordinate ({x_coord}) not found.{_get_data_var_message(data_obj)}"
+            )
+        if y_coord in data_obj.coords:
+            data_obj.rio._y_coord = y_coord
+        else:
+            raise MissingSpatialCoordinateError(
+                f"y coordinate ({y_coord}) not found.{_get_data_var_message(data_obj)}"
+            )
+
+        return data_obj
+
     def set_spatial_dims(
         self, x_dim: str, y_dim: str, inplace: bool = True
     ) -> Union[xarray.Dataset, xarray.DataArray]:
@@ -865,7 +958,30 @@ class XRasterBase:
             raise MissingSpatialDimensionError(
                 f"y dimension ({y_dim}) not found.{_get_data_var_message(data_obj)}"
             )
+
         return data_obj
+
+    @property
+    def x_coord(self) -> Hashable:
+        """Hashable: The coordinate for the X-axis."""
+        if self._x_coord is not None:
+            return self._x_coord
+        raise MissingSpatialCoordinateError(
+            "x coordinate not found. 'rio.set_spatial_coords()' or "
+            "using 'rename()' to change the coordinate name to 'x' can address this."
+            f"{_get_data_var_message(self._obj)}"
+        )
+
+    @property
+    def y_coord(self) -> Hashable:
+        """Hashable: The coordinate for the Y-axis."""
+        if self._y_coord is not None:
+            return self._y_coord
+        raise MissingSpatialCoordinateError(
+            "x coordinate not found. 'rio.set_spatial_coords()' or "
+            "using 'rename()' to change the coordinate name to 'y' can address this."
+            f"{_get_data_var_message(self._obj)}"
+        )
 
     @property
     def x_dim(self) -> Hashable:
@@ -894,7 +1010,7 @@ class XRasterBase:
         """int: Returns the width of the dataset (x dimension size)"""
         if self._width is not None:
             return self._width
-        self._width = self._obj[self.x_dim].size
+        self._width = self._obj.sizes[self.x_dim]
         return self._width
 
     @property
@@ -902,7 +1018,7 @@ class XRasterBase:
         """int: Returns the height of the dataset (y dimension size)"""
         if self._height is not None:
             return self._height
-        self._height = self._obj[self.y_dim].size
+        self._height = self._obj.sizes[self.y_dim]
         return self._height
 
     @property
@@ -943,6 +1059,19 @@ class XRasterBase:
             )
         return str(extra_dims[0]) if extra_dims else None
 
+    def _require_one_dimensional_coords(self):
+        try:
+            x_ndim = self._obj.coords[self.x_coord].ndim
+            y_ndim = self._obj.coords[self.y_coord].ndim
+        except MissingSpatialCoordinateError:
+            return
+
+        if x_ndim != 1 or y_ndim != 1:
+            raise DimensionError(
+                "Only 1D coordinates are supported for this oparation."
+                f"{_get_data_var_message(self._obj)}"
+            )
+
     @property
     def count(self) -> int:
         """int: Returns the band count (z dimension size)"""
@@ -956,20 +1085,24 @@ class XRasterBase:
 
     def _internal_bounds(self) -> tuple[float, float, float, float]:
         """Determine the internal bounds of the `xarray.DataArray`"""
-        if self.x_dim not in self._obj.coords:
-            raise DimensionMissingCoordinateError(f"{self.x_dim} missing coordinates.")
-        if self.y_dim not in self._obj.coords:
-            raise DimensionMissingCoordinateError(f"{self.y_dim} missing coordinates.")
-        try:
-            left = float(self._obj[self.x_dim][0])
-            right = float(self._obj[self.x_dim][-1])
-            top = float(self._obj[self.y_dim][0])
-            bottom = float(self._obj[self.y_dim][-1])
-        except IndexError:
+        if self._obj.sizes[self.x_dim] == 0 or self._obj.sizes[self.y_dim] == 0:
             raise NoDataInBounds(
                 "Unable to determine bounds from coordinates."
                 f"{_get_data_var_message(self._obj)}"
             ) from None
+        if (
+            self._obj.coords[self.x_coord].ndim == 1
+            and self._obj.coords[self.y_coord].ndim == 1
+        ):
+            left = float(self._obj.coords[self.x_coord][0])
+            right = float(self._obj.coords[self.x_coord][-1])
+            top = float(self._obj.coords[self.y_dim][0])
+            bottom = float(self._obj.coords[self.y_dim][-1])
+        else:
+            left = float(self._obj.coords[self.x_coord].min())
+            right = float(self._obj.coords[self.x_coord].max())
+            top = float(self._obj.coords[self.y_coord].max())
+            bottom = float(self._obj.coords[self.y_coord].min())
         return left, bottom, right, top
 
     def resolution(self, recalc: bool = False) -> tuple[float, float]:
@@ -988,6 +1121,7 @@ class XRasterBase:
         x_resolution, y_resolution: float
             The resolution of the `xarray.DataArray` | `xarray.Dataset`
         """
+        self._require_one_dimensional_coords()
         transform = self._cached_transform()
 
         if (
@@ -999,7 +1133,7 @@ class XRasterBase:
         # use the cached transform resolution
         try:
             left, bottom, right, top = self._internal_bounds()
-        except DimensionMissingCoordinateError:
+        except MissingSpatialCoordinateError:
             if transform is None:
                 raise
             return _resolution(transform)
@@ -1031,6 +1165,7 @@ class XRasterBase:
         left, bottom, right, top: float
             Outermost coordinates of the `xarray.DataArray` | `xarray.Dataset`.
         """
+        self._require_one_dimensional_coords()
         resolution_x, resolution_y = self.resolution(recalc=recalc)
 
         try:
@@ -1040,7 +1175,7 @@ class XRasterBase:
             right += resolution_x / 2.0
             top -= resolution_y / 2.0
             bottom += resolution_y / 2.0
-        except DimensionMissingCoordinateError as error:
+        except MissingSpatialCoordinateError as error:
             transform = self._cached_transform()
             if not transform:
                 raise RioXarrayError("Transform not able to be determined.") from error
@@ -1099,9 +1234,12 @@ class XRasterBase:
         row_slice = slice(int(row_start), int(row_stop))
         col_slice = slice(int(col_start), int(col_stop))
         array_subset = (
-            self._obj.isel({self.y_dim: row_slice, self.x_dim: col_slice})
+            self._obj.isel({self.y_coord: row_slice, self.x_coord: col_slice})
             .copy()  # this is to prevent sharing coordinates with the original dataset
             .rio.set_spatial_dims(x_dim=self.x_dim, y_dim=self.y_dim, inplace=True)
+            .rio.set_spatial_coords(
+                x_coord=self.x_coord, y_coord=self.y_coord, inplace=True
+            )
             .rio.write_transform(
                 transform=rasterio.windows.transform(
                     rasterio.windows.Window.from_slices(
@@ -1159,9 +1297,12 @@ class XRasterBase:
             x_slice = slice(minx, maxx)
 
         subset = (
-            self._obj.sel({self.x_dim: x_slice, self.y_dim: y_slice})
+            self._obj.sel({self.x_coord: x_slice, self.x_coord: y_slice})
             .copy()  # this is to prevent sharing coordinates with the original dataset
             .rio.set_spatial_dims(x_dim=self.x_dim, y_dim=self.y_dim, inplace=True)
+            .rio.set_spatial_coords(
+                x_coord=self.x_coord, y_coord=self.y_coord, inplace=True
+            )
             .rio.write_transform(inplace=True)
         )
         return subset

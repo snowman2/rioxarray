@@ -15,8 +15,16 @@ class SingleVariableDataset(RioXarrayError):
     """This is for when you have a dataset with a single variable."""
 
 
+class CoordinateError(RioXarrayError):
+    """This is raised when there errors related to coordinates."""
+
+
+class MissingSpatialCoordinateError(CoordinateError):
+    """This is raised when the coordinate cannot be found"""
+
+
 class DimensionError(RioXarrayError):
-    """This is raised when there are more dimensions than is supported by the method"""
+    """This is raised when there are errors related to dimensions."""
 
 
 class MissingSpatialDimensionError(DimensionError):

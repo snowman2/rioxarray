@@ -21,8 +21,8 @@ from rasterio.windows import Window
 
 import rioxarray
 from rioxarray.exceptions import (
-    DimensionMissingCoordinateError,
     MissingCRS,
+    MissingSpatialCoordinateError,
     MissingSpatialDimensionError,
     NoDataInBounds,
     OneDimensionalRaster,
@@ -701,7 +701,7 @@ def test_clip__non_geospatial(dummy_dataset_non_geospatial):
     ]
     ds = dummy_dataset_non_geospatial
     assert ds.stuff.shape == (6, 6, 6)
-    with pytest.raises(MissingSpatialDimensionError):
+    with pytest.raises(MissingSpatialCoordinateError):
         ds.rio.clip(geometries)
 
     ds_clip = ds[["stuff", "meta"]].rio.clip(geometries)
@@ -718,7 +718,7 @@ def test_clip__non_geospatial(dummy_dataset_non_geospatial):
 def test_clip_box__non_geospatial(dummy_dataset_non_geospatial):
     ds = dummy_dataset_non_geospatial
     assert ds.stuff.shape == (6, 6, 6)
-    with pytest.raises(MissingSpatialDimensionError):
+    with pytest.raises(MissingSpatialCoordinateError):
         ds.rio.clip_box(
             minx=425500.18381405,
             miny=4615395.54054639,
@@ -750,7 +750,7 @@ def test_clip_box__non_geospatial(dummy_dataset_non_geospatial):
 def test_reproject__non_geospatial(dummy_dataset_non_geospatial):
     ds = dummy_dataset_non_geospatial
     assert ds.stuff.shape == (6, 6, 6)
-    with pytest.raises(MissingSpatialDimensionError):
+    with pytest.raises(MissingSpatialCoordinateError):
         ds.rio.reproject("EPSG:4326")
 
     ds_reproject = ds[["stuff", "meta"]].rio.reproject("EPSG:4326")
@@ -767,7 +767,7 @@ def test_reproject__non_geospatial(dummy_dataset_non_geospatial):
 def test_reproject_match__non_geospatial(dummy_dataset_non_geospatial):
     ds = dummy_dataset_non_geospatial
     assert ds.stuff.shape == (6, 6, 6)
-    with pytest.raises(MissingSpatialDimensionError):
+    with pytest.raises(MissingSpatialCoordinateError):
         ds.rio.reproject_match(ds)
 
     ds_reproject = ds[["stuff", "meta"]].rio.reproject_match(ds)
@@ -796,6 +796,7 @@ def test_reproject_match__geographic_dataset():
     ds = (
         ds.rio.write_crs(4326, inplace=True)
         .rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=True)
+        .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
         .rio.write_coordinate_system(inplace=True)
     )
     ds_match = ds.rio.reproject_match(ds)
@@ -861,7 +862,7 @@ def test_interpolate_na__non_geospatial(dummy_dataset_non_geospatial):
     pytest.importorskip("scipy")
     ds = dummy_dataset_non_geospatial
     assert ds.stuff.shape == (6, 6, 6)
-    with pytest.raises(MissingSpatialDimensionError):
+    with pytest.raises(MissingSpatialCoordinateError):
         ds.rio.interpolate_na()
 
     ds_interp = ds[["stuff", "meta"]].rio.interpolate_na()
@@ -878,7 +879,7 @@ def test_interpolate_na__non_geospatial(dummy_dataset_non_geospatial):
 def test_pad_box__non_geospatial(dummy_dataset_non_geospatial):
     ds = dummy_dataset_non_geospatial
     assert ds.stuff.shape == (6, 6, 6)
-    with pytest.raises(MissingSpatialDimensionError):
+    with pytest.raises(MissingSpatialCoordinateError):
         ds.rio.pad_box(*ds.rio.bounds())
 
     ds_pad_box = (
@@ -1924,7 +1925,9 @@ def test_set_spatial_dims():
         dims=("lat", "lon"),
         coords={"lat": numpy.arange(1, 6), "lon": numpy.arange(2, 7)},
     )
-    test_da_copy = test_da.rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=False)
+    test_da_copy = test_da.rio.set_spatial_dims(
+        x_dim="lon", y_dim="lat", inplace=False
+    ).rio.set_spatial_coords(x_coord="lon", y_coord="lat")
     assert test_da_copy.rio.x_dim == "lon"
     assert test_da_copy.rio.y_dim == "lat"
     assert test_da_copy.rio.width == 5
@@ -1937,7 +1940,9 @@ def test_set_spatial_dims():
     with pytest.raises(MissingSpatialDimensionError):
         test_da.rio.height
 
-    test_da.rio.set_spatial_dims(x_dim="lon", y_dim="lat", inplace=True)
+    test_da.rio.set_spatial_dims(
+        x_dim="lon", y_dim="lat", inplace=True
+    ).rio.set_spatial_coords(x_coord="lon", y_coord="lat")
     assert test_da.rio.x_dim == "lon"
     assert test_da.rio.y_dim == "lat"
     assert test_da.rio.width == 5
@@ -1949,13 +1954,18 @@ def test_set_spatial_dims__missing():
     test_ds = xarray.Dataset()
     with pytest.raises(MissingSpatialDimensionError):
         test_ds.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+    with pytest.raises(MissingSpatialCoordinateError):
+        test_ds.rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+
     test_da = xarray.DataArray(
         numpy.zeros((5, 5)),
         dims=("lat", "lon"),
         coords={"lat": numpy.arange(1, 6), "lon": numpy.arange(2, 7)},
     )
     with pytest.raises(MissingSpatialDimensionError):
-        test_da.rio.set_spatial_dims(x_dim="long", y_dim="lati")
+        test_da.rio.set_spatial_dims(x_dim="long", y_dim="lat")
+    with pytest.raises(MissingSpatialCoordinateError):
+        test_ds.rio.set_spatial_coords(x_coord="lon", y_coord="lat")
 
 
 def test_crs_empty_dataset():
@@ -2461,7 +2471,11 @@ def test_nonstandard_dims_clip__dataset():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        clipped = xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat").rio.clip([geom])
+        clipped = (
+            xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.clip([geom])
+        )
         assert clipped.rio.width == 6
         assert clipped.rio.height == 5
 
@@ -2474,9 +2488,11 @@ def test_nonstandard_dims_clip__array():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        clipped = xds.analysed_sst.rio.set_spatial_dims(
-            x_dim="lon", y_dim="lat"
-        ).rio.clip([geom])
+        clipped = (
+            xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.clip([geom])
+        )
         assert clipped.rio.width == 6
         assert clipped.rio.height == 5
 
@@ -2487,11 +2503,15 @@ def test_nonstandard_dims_clip_box__dataset():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        clipped = xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat").rio.clip_box(
-            -70.51367964678269,
-            -23.780199727400767,
-            -70.44589567737998,
-            -23.71896017814794,
+        clipped = (
+            xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.clip_box(
+                -70.51367964678269,
+                -23.780199727400767,
+                -70.44589567737998,
+                -23.71896017814794,
+            )
         )
         assert clipped.rio.width == 7
         assert clipped.rio.height == 7
@@ -2503,13 +2523,15 @@ def test_nonstandard_dims_clip_box_array():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        clipped = xds.analysed_sst.rio.set_spatial_dims(
-            x_dim="lon", y_dim="lat"
-        ).rio.clip_box(
-            -70.51367964678269,
-            -23.780199727400767,
-            -70.44589567737998,
-            -23.71896017814794,
+        clipped = (
+            xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.clip_box(
+                -70.51367964678269,
+                -23.780199727400767,
+                -70.44589567737998,
+                -23.71896017814794,
+            )
         )
         assert clipped.rio.width == 7
         assert clipped.rio.height == 7
@@ -2521,13 +2543,15 @@ def test_nonstandard_dims_slice_xy_array():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        clipped = xds.analysed_sst.rio.set_spatial_dims(
-            x_dim="lon", y_dim="lat"
-        ).rio.slice_xy(
-            -70.51367964678269,
-            -23.780199727400767,
-            -70.44589567737998,
-            -23.71896017814794,
+        clipped = (
+            xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.slice_xy(
+                -70.51367964678269,
+                -23.780199727400767,
+                -70.44589567737998,
+                -23.71896017814794,
+            )
         )
         assert clipped.rio.width == 7
         assert clipped.rio.height == 7
@@ -2539,7 +2563,9 @@ def test_nonstandard_dims_reproject__dataset():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        xds = xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+        xds = xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat").rio.set_spatial_coords(
+            x_coord="lon", y_coord="lat"
+        )
         reprojected = xds.rio.reproject("epsg:3857")
         assert reprojected.rio.width == 11
         assert reprojected.rio.height == 11
@@ -2552,9 +2578,11 @@ def test_nonstandard_dims_reproject__array():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        reprojected = xds.analysed_sst.rio.set_spatial_dims(
-            x_dim="lon", y_dim="lat"
-        ).rio.reproject("epsg:3857")
+        reprojected = (
+            xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.reproject("epsg:3857")
+        )
         assert reprojected.rio.width == 11
         assert reprojected.rio.height == 11
         assert reprojected.rio.crs.to_epsg() == 3857
@@ -2567,9 +2595,11 @@ def test_nonstandard_dims_interpolate_na__dataset():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        reprojected = xds.rio.set_spatial_dims(
-            x_dim="lon", y_dim="lat"
-        ).rio.interpolate_na()
+        reprojected = (
+            xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.interpolate_na()
+        )
         assert reprojected.rio.width == 11
         assert reprojected.rio.height == 11
 
@@ -2581,9 +2611,11 @@ def test_nonstandard_dims_interpolate_na__array():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        reprojected = xds.analysed_sst.rio.set_spatial_dims(
-            x_dim="lon", y_dim="lat"
-        ).rio.interpolate_na()
+        reprojected = (
+            xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.interpolate_na()
+        )
         assert reprojected.rio.width == 11
         assert reprojected.rio.height == 11
 
@@ -2594,9 +2626,11 @@ def test_nonstandard_dims_write_nodata__array():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        reprojected = xds.analysed_sst.rio.set_spatial_dims(
-            x_dim="lon", y_dim="lat"
-        ).rio.write_nodata(-999)
+        reprojected = (
+            xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.write_nodata(-999)
+        )
         assert reprojected.rio.width == 11
         assert reprojected.rio.height == 11
         assert reprojected.rio.nodata == -999
@@ -2608,9 +2642,11 @@ def test_nonstandard_dims_isel_window():
     ) as xds:
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        reprojected = xds.rio.set_spatial_dims(
-            x_dim="lon", y_dim="lat"
-        ).rio.isel_window(Window.from_slices(slice(4), slice(5)))
+        reprojected = (
+            xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
+            .rio.isel_window(Window.from_slices(slice(4), slice(5)))
+        )
         assert reprojected.rio.width == 5
         assert reprojected.rio.height == 4
 
@@ -2674,7 +2710,9 @@ def test_nonstandard_dims_to_raster__dataset(tmp_path):
         xds.attrs.pop("grid_mapping")
         xds.coords["lon"].attrs = {}
         xds.coords["lat"].attrs = {}
-        xds.squeeze().rio.set_spatial_dims(x_dim="lon", y_dim="lat").rio.to_raster(
+        xds.squeeze().rio.set_spatial_dims(
+            x_dim="lon", y_dim="lat"
+        ).rio.set_spatial_coords(x_coord="lon", y_coord="lat").rio.to_raster(
             tmp_path / "test.tif"
         )
 
@@ -2686,12 +2724,12 @@ def test_missing_crs_error_msg():
         xds = xds.drop_vars("spatial_ref")
         xds.attrs.pop("grid_mapping")
         with pytest.raises(MissingCRS, match="Data variable: analysed_sst"):
-            xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat").rio.reproject(
-                "EPSG:4326"
-            )
+            xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat").rio.set_spatial_coords(
+                x_coord="lon", y_coord="lat"
+            ).rio.reproject("EPSG:4326")
         with pytest.raises(MissingCRS, match="Data variable: analysed_sst"):
-            xds.rio.set_spatial_dims(
-                x_dim="lon", y_dim="lat"
+            xds.rio.set_spatial_dims(x_dim="lon", y_dim="lat").rio.set_spatial_coords(
+                x_coord="lon", y_coord="lat"
             ).analysed_sst.rio.reproject("EPSG:4326")
 
 
@@ -2701,7 +2739,7 @@ def test_missing_transform_bounds():
         parse_coordinates=False,
     ) as xds:
         xds.coords["spatial_ref"].attrs.pop("GeoTransform")
-        with pytest.raises(DimensionMissingCoordinateError):
+        with pytest.raises(MissingSpatialCoordinateError):
             xds.rio.bounds()
 
 
@@ -2711,7 +2749,7 @@ def test_missing_transform_resolution():
         parse_coordinates=False,
     ) as xds:
         xds.coords["spatial_ref"].attrs.pop("GeoTransform")
-        with pytest.raises(DimensionMissingCoordinateError):
+        with pytest.raises(MissingSpatialCoordinateError):
             xds.rio.resolution()
 
 
@@ -2800,7 +2838,9 @@ def test_nonstandard_dims_write_coordinate_system__geographic():
     with xarray.open_dataset(
         os.path.join(TEST_INPUT_DATA_DIR, "nonstandard_dim.nc")
     ) as xds:
-        xda = xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+        xda = xds.analysed_sst.rio.set_spatial_dims(
+            x_dim="lon", y_dim="lat"
+        ).rio.set_spatial_coords(x_coord="lon", y_coord="lat")
         xda.coords[xda.rio.x_dim].attrs = {}
         xda.coords[xda.rio.y_dim].attrs = {}
         cs_array = xda.rio.write_crs("EPSG:4326").rio.write_coordinate_system()
@@ -2824,6 +2864,7 @@ def test_nonstandard_dims_write_coordinate_system__geographic__preserve_attrs():
     ) as xds:
         cs_array = (
             xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+            .rio.set_spatial_coords(x_coord="lon", y_coord="lat")
             .rio.write_crs("EPSG:4326")
             .rio.write_coordinate_system()
         )
@@ -2851,7 +2892,10 @@ def test_nonstandard_dims_write_coordinate_system__projected_ft():
     with xarray.open_dataset(
         os.path.join(TEST_INPUT_DATA_DIR, "nonstandard_dim.nc")
     ) as xds:
-        xda = xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+        print(xds)
+        xda = xds.analysed_sst.rio.set_spatial_dims(
+            x_dim="lon", y_dim="lat"
+        ).rio.set_spatial_coords(x_coord="lon", y_coord="lat")
         xda.coords[xda.rio.x_dim].attrs = {}
         xda.coords[xda.rio.y_dim].attrs = {}
         cs_array = xda.rio.write_crs("EPSG:3418").rio.write_coordinate_system()
@@ -2873,7 +2917,9 @@ def test_nonstandard_dims_write_coordinate_system__no_crs():
     with xarray.open_dataset(
         os.path.join(TEST_INPUT_DATA_DIR, "nonstandard_dim.nc")
     ) as xds:
-        xda = xds.analysed_sst.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+        xda = xds.analysed_sst.rio.set_spatial_dims(
+            x_dim="lon", y_dim="lat"
+        ).rio.set_spatial_coords(x_coord="lon", y_coord="lat")
         xda.coords[xda.rio.x_dim].attrs = {}
         xda.coords[xda.rio.y_dim].attrs = {}
         xda.coords["spatial_ref"].attrs = {}
