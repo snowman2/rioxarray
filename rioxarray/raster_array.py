@@ -9,6 +9,7 @@ datacube is licensed under the Apache License, Version 2.0:
 - https://github.com/opendatacube/datacube-core/blob/1d345f08a10a13c316f81100936b0ad8b1a374eb/LICENSE  # noqa: E501
 
 """
+
 import copy
 import os
 from collections.abc import Hashable, Iterable, Mapping
@@ -438,11 +439,20 @@ class RasterArray(XRasterBase):
         if gcps:
             kwargs.setdefault("gcps", gcps)
 
-        gcps_or_rpcs = "gcps" in kwargs or "rpcs" in kwargs
-        src_affine = None if gcps_or_rpcs else self.transform(recalc=True)
+        use_affine = (
+            "gcps" not in kwargs
+            and "rpcs" not in kwargs
+            and "src_geoloc_array" not in kwargs
+        )
+        src_affine = None if not use_affine else self.transform(recalc=True)
         if transform is None:
             dst_affine, dst_width, dst_height = _make_dst_affine(
-                self._obj, self.crs, dst_crs, resolution, shape, **kwargs
+                self._obj,
+                self.crs,
+                dst_crs,
+                resolution,
+                shape,
+                **kwargs,
             )
         else:
             dst_affine = transform
@@ -454,7 +464,6 @@ class RasterArray(XRasterBase):
         dst_data = self._create_dst_data(dst_height, dst_width)
 
         dst_nodata = self._get_dst_nodata(nodata)
-
         rasterio.warp.reproject(
             source=self._obj.values,
             destination=dst_data,
@@ -486,7 +495,7 @@ class RasterArray(XRasterBase):
                 dst_affine=dst_affine,
                 dst_width=dst_width,
                 dst_height=dst_height,
-                force_generate=gcps_or_rpcs,
+                force_generate=not use_affine,
             ),
             dims=tuple(dst_dims),
             attrs=new_attrs,
